@@ -240,6 +240,69 @@ struct codec_name_pref_table codec_pref_table[] = {{"speex", 8000, "speex_8k_pre
 	return dir == NSLocaleLanguageDirectionRightToLeft;
 }
 
+#pragma mark - bctoolbox vfs override
+
+static int myBcClose(bctbx_vfs_file_t *pFile);
+
+typedef struct {
+    char * fileName;
+    bctbx_io_methods_t originalMethods;
+    bctbx_io_methods_t overridenMethods;
+} FileUserData;
+
+static FileUserData *file_userdata_new(bctbx_vfs_file_t *pFile, const char *fName) {
+    FileUserData * userData = calloc(1, sizeof(FileUserData));
+    userData->fileName = strdup(fName);
+    userData->originalMethods = *pFile->pMethods;
+    userData->overridenMethods = userData->originalMethods;
+    userData->overridenMethods.pFuncClose = myBcClose;
+    return userData;
+}
+
+static void file_userdata_close(FileUserData ** ppUserData) {
+    FileUserData * userData = *ppUserData;
+    free(userData->fileName);
+    free(userData);
+    *ppUserData = NULL;
+}
+
+static  int myBcOpen(bctbx_vfs_t *pVfs, bctbx_vfs_file_t *pFile, const char *fName, int openFlags) {
+    bctbx_vfs_t* stdVfs = bctbx_vfs_get_standard();
+    NSLog(@"About to read %s... checking file signature", fName);
+    /*
+       ... signature checking ...
+     */
+    int result = stdVfs->pFuncOpen(pVfs, pFile, fName, openFlags);
+    if (result == BCTBX_VFS_OK) {
+        FileUserData * userData = file_userdata_new(pFile, fName);
+        pFile->pMethods = &userData->overridenMethods;
+        pFile->pUserData = userData;
+    }
+    return result;
+}
+
+static int myBcClose(bctbx_vfs_file_t *pFile) {
+    FileUserData * userData = (FileUserData *) pFile->pUserData;
+    int result = userData->originalMethods.pFuncClose(pFile);
+    if (result == BCTBX_VFS_OK) {
+        NSLog(@"Did close file %s... computing signature", userData->fileName);
+        /*
+         ... recompute signature ...
+         */
+        file_userdata_close(&pFile->pUserData);
+    }
+    return result;
+}
+
+static bctbx_vfs_t bcOverrideVfs = {
+    "override_vfs",
+    myBcOpen,
+};
+
+- (void)addVfsHooks {
+    bctbx_vfs_set_default(&bcOverrideVfs);
+}
+
 #pragma mark - Lifecycle Functions
 
 - (id)init {
@@ -248,6 +311,8 @@ struct codec_name_pref_table codec_pref_table[] = {{"speex", 8000, "speex_8k_pre
 											   selector:@selector(audioRouteChangeListenerCallback:)
 												   name:AVAudioSessionRouteChangeNotification
 												 object:nil];
+
+        [self addVfsHooks];
 
 		NSString *path = [[NSBundle mainBundle] pathForResource:@"msg" ofType:@"wav"];
 		self.messagePlayer = [[AVAudioPlayer alloc] initWithContentsOfURL:[NSURL URLWithString:path] error:nil];
